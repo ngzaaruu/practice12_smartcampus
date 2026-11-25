@@ -28,6 +28,7 @@ import {
 import { ROOMS, type Booking } from './data/rooms';
 import { sanitizeTimeInput } from './inputFormat';
 import { filterRooms } from './filters';
+import { checkWithDuration } from './contract';
 import {
   canExplain,
   deriveReasonCode,
@@ -64,7 +65,7 @@ const parseAttendees = (raw: string): number | null => {
 // All user inputs in one place, so one handler can update any of them.
 interface FormState {
   startRaw: string;
-  endRaw: string;
+  durationRaw: string;
   attendeesRaw: string;
   equipment: readonly string[];
   roomId: string | null;
@@ -72,7 +73,7 @@ interface FormState {
 
 const EMPTY_FORM: FormState = {
   startRaw: '',
-  endRaw: '',
+  durationRaw: '',
   attendeesRaw: '1',
   equipment: [],
   roomId: null,
@@ -211,7 +212,9 @@ export default function App() {
   const update = (patch: Partial<FormState>) => setForm((f) => ({ ...f, ...patch }));
 
   const startMin = parseMin(form.startRaw);
-  const endMin = parseMin(form.endRaw);
+  const durationMin = parseMin(form.durationRaw);
+  // End is derived from the contract inputs: end = start + duration.
+  const endMin = startMin !== null && durationMin !== null ? startMin + durationMin : null;
   const attendees = parseAttendees(form.attendeesRaw);
 
   // F1 + F2: only rooms that fit. Blocked rooms stay listed but can never be available (F3).
@@ -224,6 +227,15 @@ export default function App() {
   // A selection that no longer passes the filters is dropped automatically.
   const selectedRoom = matchingRooms.find((r) => r.id === form.roomId) ?? null;
 
+  // Practice 12 contract output (isAvailable, reasonCode, message) for the time window.
+  const contract = useMemo(() => {
+    if (!checked || attendees === null || selectedRoom === null) return null;
+    return checkWithDuration(
+      { startRaw: form.startRaw, durationRaw: form.durationRaw },
+      selectedRoom
+    );
+  }, [checked, attendees, selectedRoom, form.startRaw, form.durationRaw]);
+
   const result: Result | null = useMemo(() => {
     if (!checked) return null;
     if (attendees === null) {
@@ -232,12 +244,9 @@ export default function App() {
     if (selectedRoom === null) {
       return { kind: 'error', reasons: ['Select a room from the list first.'] };
     }
-    // Old time and overlap rules; a blocked room always returns "unavailable".
-    return checkRoomAvailability(
-      { startRaw: form.startRaw, endRaw: form.endRaw },
-      selectedRoom
-    );
-  }, [checked, attendees, selectedRoom, form.startRaw, form.endRaw]);
+    // Same time and overlap rules; a blocked room always returns "unavailable".
+    return contract?.result ?? null;
+  }, [checked, attendees, selectedRoom, contract]);
 
   const resultKind: 'available' | 'unavailable' | 'error' | 'idle' =
     result === null ? 'idle' : result.kind;
@@ -289,9 +298,9 @@ export default function App() {
 
   const quickOptions = useMemo(
     () => [
-      { label: '11:00 – 12:00', s: 660, e: 720 },
-      { label: '09:30 – 10:30', s: 570, e: 630 },
-      { label: '13:00 – 15:00', s: 780, e: 900 },
+      { label: '11:00, 60 min', s: 660, d: 60 },
+      { label: '09:30, 60 min', s: 570, d: 60 },
+      { label: '13:00, 120 min', s: 780, d: 120 },
     ],
     []
   );
@@ -642,41 +651,46 @@ export default function App() {
 
             <div>
               <label
-                htmlFor="end-input"
+                htmlFor="duration-input"
                 className="block text-sm font-medium text-slate-700 mb-1"
               >
-                End time
+                Duration
               </label>
               <div className="relative">
                 <input
-                  id="end-input"
+                  id="duration-input"
                   type="number"
                   inputMode="numeric"
-                  value={form.endRaw}
-                  onChange={(e) => update({ endRaw: sanitizeTimeInput(e.target.value) })}
-                  placeholder="e.g. 720"
+                  value={form.durationRaw}
+                  onChange={(e) => update({ durationRaw: sanitizeTimeInput(e.target.value) })}
+                  placeholder="e.g. 60"
                   className="w-full rounded-xl border border-slate-300 px-3 py-2.5 text-base text-slate-900 placeholder-slate-400 focus:border-sky-500 focus:ring-2 focus:ring-sky-500/30 focus:outline-none transition"
                 />
                 <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">
                   min
                 </span>
               </div>
-              {endMin !== null && (
+              {durationMin !== null && (
                 <p className="mt-1 text-xs text-slate-500">
-                  {endMin >= TIME_LIMITS.endMin && endMin <= TIME_LIMITS.endMax ? (
-                    <>
-                      <span className="font-semibold text-slate-700">{endMin} min</span>{' '}
-                      = {fmtTime(endMin)}
-                    </>
+                  {durationMin >= 1 && durationMin <= TIME_LIMITS.maxDuration ? (
+                    endMin !== null && endMin <= TIME_LIMITS.endMax ? (
+                      <>
+                        Ends at{' '}
+                        <span className="font-semibold text-slate-700">{fmtTime(endMin)}</span>{' '}
+                        ({endMin} min)
+                      </>
+                    ) : (
+                      <span className="text-slate-500">{durationMin} min</span>
+                    )
                   ) : (
                     <span className="text-amber-600">
-                      {endMin} min is outside {TIME_LIMITS.endMin}–{TIME_LIMITS.endMax}
+                      {durationMin} min is outside 1–{TIME_LIMITS.maxDuration}
                     </span>
                   )}
                 </p>
               )}
               <p className="mt-1 text-[11px] text-slate-400">
-                Minutes after midnight ({TIME_LIMITS.endMin}–{TIME_LIMITS.endMax})
+                Length in minutes (1–{TIME_LIMITS.maxDuration})
               </p>
             </div>
           </div>
@@ -689,7 +703,7 @@ export default function App() {
                 <button
                   key={o.label}
                   type="button"
-                  onClick={() => update({ startRaw: String(o.s), endRaw: String(o.e) })}
+                  onClick={() => update({ startRaw: String(o.s), durationRaw: String(o.d) })}
                   className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-600 hover:border-sky-300 hover:bg-sky-50 hover:text-sky-700 transition"
                 >
                   {o.label}
@@ -722,6 +736,19 @@ export default function App() {
         {/* Result */}
         {result && (
           <section className="mb-6 animate-[fadeIn_0.2s_ease-out]" aria-live="polite">
+            {contract !== null && (
+              <p className="mb-2 text-xs text-slate-500" data-testid="reason-code">
+                isAvailable:{' '}
+                <span className="font-mono font-semibold text-slate-700">
+                  {String(contract.isAvailable)}
+                </span>
+                <span className="text-slate-300"> · </span>
+                reasonCode:{' '}
+                <span className="font-mono font-semibold text-slate-700">
+                  {contract.reasonCode}
+                </span>
+              </p>
+            )}
             {result.kind === 'available' &&
               selectedRoom !== null &&
               startMin !== null &&
@@ -842,13 +869,12 @@ export default function App() {
           <ul className="space-y-2 text-sm text-slate-600">
             <li>• Only rooms that seat all attendees and have all selected equipment are listed.</li>
             <li>
-              • Start must be later than now ({fmtTime(NOW)}) and before end; start{' '}
-              {TIME_LIMITS.startMin}–{TIME_LIMITS.startMax}, end {TIME_LIMITS.endMin}–
-              {TIME_LIMITS.endMax}.
+              • Start must be later than now ({fmtTime(NOW)}); start{' '}
+              {TIME_LIMITS.startMin}–{TIME_LIMITS.startMax} minutes after midnight.
             </li>
             <li>
-              • Length must be {TIME_LIMITS.maxDuration} minutes or fewer (exactly{' '}
-              {TIME_LIMITS.maxDuration} is allowed).
+              • Duration must be more than 0 and at most {TIME_LIMITS.maxDuration} minutes
+              (exactly {TIME_LIMITS.maxDuration} is allowed), ending by midnight.
             </li>
             <li>• A blocked room is always unavailable.</li>
             <li>• Touching endpoints don't count as overlap (e.g. ends 11:00, starts 11:00 = OK).</li>
